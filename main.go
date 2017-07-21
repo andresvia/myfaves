@@ -1,18 +1,27 @@
 package main
 
 import (
+	"encoding/csv"
 	"golang.org/x/net/html"
 	"gopkg.in/urfave/cli.v1"
 	"os"
-	"strings"
-	"errors"
-	"encoding/csv"
 )
 
 type bookmark struct {
 	href        string
 	description string
-	tags        []string
+	dir         string
+	root string
+	hrefcode string
+	rootcode string
+}
+
+func getcode(url string) string {
+	return "getcode not implemented"
+}
+
+func getroot(url string) string {
+	return "getroot not implemented"
 }
 
 var app *cli.App
@@ -31,29 +40,25 @@ func action(ctx *cli.Context) error {
 	for _, arg := range ctx.Args() {
 		file, err := os.Open(arg)
 		if err != nil {
-			return err
+			return cli.NewExitError(err, 1)
 		}
 		root, err := html.Parse(file)
 		if err != nil {
-			return err
+			return cli.NewExitError(err, 2)
 		}
-		err = bookmarkify(root, []string{})
-		if err != nil {
-			return err
-		}
+		bookmarkify(root)
 		w := csv.NewWriter(os.Stdout)
+		resolveAll()
 		w.WriteAll(tablify())
 	}
 	return nil
 }
 
-func bookmarkify(n *html.Node, tags []string) error {
+func bookmarkify(n *html.Node) {
 	if n.Type == html.ElementNode && n.Data == "a" {
 		href := ""
 		text := ""
-		if n.FirstChild != nil && n.FirstChild.Type != html.TextNode {
-			return errors.New("a with first child not a document element")
-		} else if n.FirstChild != nil {
+		if n.FirstChild != nil {
 			text = n.FirstChild.Data
 		}
 		for _, a := range n.Attr {
@@ -62,19 +67,42 @@ func bookmarkify(n *html.Node, tags []string) error {
 				break
 			}
 		}
-		bookmarks = append(bookmarks, bookmark{href, text, tags})
+		bookmarks = append(bookmarks, bookmark{href, text, n.Parent.Parent.Parent.FirstChild.FirstChild.Data, "", "", ""})
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		bookmarkify(c, append(tags, n.Data))
+		bookmarkify(c)
 	}
-	return nil
+}
+
+func resolveAll() {
+	ch := make(chan bool)
+	for _, bookmark := range(bookmarks) {
+		go func() {
+			bookmark.root = getroot(bookmark.href)
+			bookmark.rootcode = getcode(bookmark.root)
+			ch <- true
+		}()
+		go func() {
+			bookmark.hrefcode = getcode(bookmark.href)
+			ch <- true
+		}()
+	}
+	mustget := 2 * len(bookmarks)
+	got := 0
+	for <- ch {
+		got++
+		println("got it")
+		if(got >= mustget) {
+			close(ch)
+		}
+	}
+
 }
 
 func tablify() [][]string {
 	table := [][]string{}
 	for _, b := range bookmarks {
-		tags := strings.Join(b.tags, ",")
-		row := []string{b.href, b.description, tags}
+		row := []string{b.href, b.description, b.dir}
 		table = append(table, row)
 	}
 	return table
