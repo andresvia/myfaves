@@ -1,31 +1,117 @@
 package main
 
 import (
+	"crypto/x509"
 	"encoding/csv"
+	"fmt"
 	"golang.org/x/net/html"
 	"gopkg.in/urfave/cli.v1"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
+	"reflect"
+	"strings"
+	"syscall"
+	"time"
 )
 
 type bookmark struct {
 	href        string
 	description string
 	dir         string
-	root string
-	hrefcode string
-	rootcode string
+	root        string
+	hrefcode    string
+	rootcode    string
 }
 
-func getcode(url string) string {
-	return "getcode not implemented"
+func getcode(geturl string) string {
+	client := &http.Client{}
+	ch := make(chan string)
+	go func() {
+		for {
+			req, _ := http.NewRequest("HEAD", geturl, nil)
+			req.Header.Add("Connection", "close")
+			resp, httperr := client.Do(req)
+			if neterr, ok := httperr.(net.Error); ok {
+				if neterr.Temporary() {
+					time.Sleep(time.Nanosecond)
+					continue
+				} else {
+					httperr = neterr
+				}
+			}
+			if urlerr, ok := httperr.(*url.Error); ok {
+				if urlerr.Temporary() {
+					time.Sleep(time.Nanosecond)
+					continue
+				} else {
+					httperr = urlerr.Err
+				}
+			}
+			if operr, ok := httperr.(*net.OpError); ok {
+				httperr = operr.Err
+			}
+			if x509err, ok := httperr.(x509.SystemRootsError); ok {
+				httperr = x509err.Err
+			}
+			if patherr, ok := httperr.(*os.PathError); ok {
+				httperr = patherr.Err
+			}
+			if dnsErr, ok := httperr.(*net.DNSError); ok {
+				if dnsErr.Temporary() || strings.Contains(dnsErr.Err, "oo many open files") || strings.Contains(dnsErr.Err, "esource temporarily unavailable") || strings.Contains(dnsErr.Err, "emporary failure in name resolution") || strings.Contains(dnsErr.Err, "connection refused") {
+					time.Sleep(time.Nanosecond)
+					continue
+				}
+			}
+			if errno, ok := httperr.(syscall.Errno); ok {
+				if errno.Temporary() {
+					time.Sleep(time.Nanosecond)
+					continue
+				}
+			}
+			if httperr != nil {
+				httperrValue := reflect.ValueOf(httperr)
+				httperrType := fmt.Sprintf(" - %v", httperrValue.Type())
+				ch <- httperr.Error() + httperrType
+				break
+			} else {
+				ch <- resp.Status
+				break
+			}
+		}
+	}()
+	select {
+	case str := <-ch:
+		return str
+	case <-time.After(timeout):
+		return timeout.String() + " timeout"
+	}
+	return <-ch
 }
 
-func getroot(url string) string {
-	return "getroot not implemented"
+func (b *bookmark) setRoot() {
+	u, err := url.Parse(b.href)
+	if err != nil {
+		u = &url.URL{Scheme: err.Error()}
+	} else {
+		u.Path = "/"
+		u.RawPath = ""
+		u.RawQuery = ""
+		u.Fragment = ""
+	}
+	b.root = u.String()
 }
 
 var app *cli.App
-var bookmarks []bookmark = []bookmark{}
+
+type bp struct {
+	*bookmark
+}
+
+var bookmarks []bp = []bp{}
+
+var timeout = time.Minute
 
 func init() {
 	app = cli.NewApp()
@@ -67,7 +153,7 @@ func bookmarkify(n *html.Node) {
 				break
 			}
 		}
-		bookmarks = append(bookmarks, bookmark{href, text, n.Parent.Parent.Parent.FirstChild.FirstChild.Data, "", "", ""})
+		bookmarks = append(bookmarks, bp{bookmark: &bookmark{href, text, n.Parent.Parent.Parent.FirstChild.FirstChild.Data, "", "", ""}})
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		bookmarkify(c)
@@ -75,34 +161,40 @@ func bookmarkify(n *html.Node) {
 }
 
 func resolveAll() {
-	ch := make(chan bool)
-	for _, bookmark := range(bookmarks) {
-		go func() {
-			bookmark.root = getroot(bookmark.href)
-			bookmark.rootcode = getcode(bookmark.root)
-			ch <- true
-		}()
-		go func() {
-			bookmark.hrefcode = getcode(bookmark.href)
-			ch <- true
-		}()
+	ch := make(chan int)
+	for _, bm := range bookmarks {
+		go func(bm *bookmark) {
+			bm.setRoot()
+			bm.rootcode = getcode(bm.root)
+			ch <- 1
+		}(bm.bookmark)
+		go func(bm *bookmark) {
+			bm.hrefcode = getcode(bm.href)
+			ch <- 1
+		}(bm.bookmark)
 	}
-	mustget := 2 * len(bookmarks)
-	got := 0
-	for <- ch {
-		got++
-		println("got it")
-		if(got >= mustget) {
-			close(ch)
+	ticker := time.NewTicker(time.Second)
+	go func() {
+		for {
+			<-ticker.C
+			ch <- 0
 		}
+	}()
+	mustget := 2 * len(bookmarks)
+	chars := []string{"◜ ", " ◝", " ◞", "◟ "}
+	then := time.Now()
+	for got := <-ch; got < mustget; got += <-ch {
+		print(fmt.Sprintf("\r%s - %d/%d - %d/%d", chars[got%len(chars)], got + 1, mustget, time.Since(then)/time.Second, timeout/time.Second))
 	}
+	ticker.Stop()
+	close(ch)
 
 }
 
 func tablify() [][]string {
 	table := [][]string{}
 	for _, b := range bookmarks {
-		row := []string{b.href, b.description, b.dir}
+		row := []string{b.href, b.description, b.dir, b.root, b.hrefcode, b.rootcode}
 		table = append(table, row)
 	}
 	return table
